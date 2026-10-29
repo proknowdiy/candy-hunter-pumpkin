@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Candy Detector · RDK X5</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #14161c; color: #e6e8ee; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    background: #1c1f28; border-bottom: 1px solid #2a2f3c; flex: 0 0 auto;
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
+  .pill {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    background: #2a2f3c; color: #9aa3b5; font-variant-numeric: tabular-nums;
+  }
+  .pill.ok { background: #14361f; color: #4ade80; }
+  .pill.bad { background: #3a1a1a; color: #f87171; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage {
+    flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+    background: #0b0d11; min-width: 0;
+  }
+  #wrap { position: relative; line-height: 0; }
+  #frame, #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #frame { position: relative; display: block; max-width: 100%; max-height: 100%; }
+  #overlay { pointer-events: none; }
+  aside {
+    width: 300px; flex: 0 0 300px; background: #1c1f28; border-left: 1px solid #2a2f3c;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  aside h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: #7c869c;
+    padding: 12px 14px 8px;
+  }
+  #list { flex: 1; overflow-y: auto; padding: 0 10px 10px; }
+  .item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px;
+    background: #232733; border-radius: 8px; font-size: 13px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+  .item .name { flex: 1; font-weight: 500; }
+  .item .score { color: #9aa3b5; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .empty { color: #5c6478; font-size: 13px; padding: 10px; text-align: center; }
+
+  .control-panel {
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2f3c;
+  }
+
+  .control-panel label {
+    display: block;
+    margin-bottom: 8px;
+    color: #9aa3b5;
+    font-size: 12px;
+  }
+
+  #modeSelect {
+    width: 100%;
+    padding: 10px;
+    border-radius: 7px;
+    border: 1px solid #41485a;
+    background: #14161c;
+    color: #e6e8ee;
+    font-size: 14px;
+  }
+
+  #controlStatus {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #9aa3b5;
+  }
+
+  footer {
+    padding: 8px 14px; font-size: 11px; color: #5c6478; border-top: 1px solid #2a2f3c;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Candy Detector</h1>
+  <span class="pill" id="status">connecting…</span>
+  <span class="pill" id="fps">fps –</span>
+  <span class="pill" id="infer">infer –</span>
+  <span class="pill" id="count">0 objects</span>
+</header>
+<main>
+  <div id="stage">
+    <div id="wrap">
+      <img id="frame" alt="camera" />
+      <canvas id="overlay"></canvas>
+    </div>
+  </div>
+  <aside>
+    <div class="control-panel">
+      <label for="modeSelect">Pumpkin Mode</label>
+
+      <select id="modeSelect">
+        <option value="standby">Standby Mode</option>
+        <option value="hunt">Hunt Candy Mode</option>
+      </select>
+
+      <div id="controlStatus">Waiting for connection…</div>
+    </div>
+
+    <h2>Detections</h2>
+
+    <div id="list"><div class="empty">waiting for frames…</div></div>
+    <footer id="meta">–</footer>
+  </aside>
+</main>
+
+<script>
+const COLORS = ['#14CCBA', '#0066FF', '#F5A623', '#6DB324', '#9013FE', '#F5222D', '#0CB', '#F8E71C'];
+
+const img = document.getElementById('frame');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const wrap = document.getElementById('wrap');
+const elStatus = document.getElementById('status');
+const elFps = document.getElementById('fps');
+const elInfer = document.getElementById('infer');
+const elCount = document.getElementById('count');
+const elList = document.getElementById('list');
+const elMeta = document.getElementById('meta');
+
+const modeSelect = document.getElementById('modeSelect');
+const controlStatus = document.getElementById('controlStatus');
+
+let lastUrl = null;
+let pending = null;
+let drawing = false;
+
+let controlSocket = null;
+let requestedMode = 'standby';
+
+function setStatus(text, cls) {
+  elStatus.textContent = text;
+  elStatus.className = 'pill' + (cls ? ' ' + cls : '');
+}
+
+function colorFor(id) { return COLORS[id % COLORS.length]; }
+
+function draw(meta) {
+  const w = meta.width, h = meta.height;
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  ctx.clearRect(0, 0, w, h);
+  const scale = w / 1000; // line width scales with resolution
+  const lw = Math.max(2, 3 * scale);
+  const fs = Math.max(16, 26 * scale);
+
+  for (const d of meta.detections) {
+    const [x1, y1, x2, y2] = d.box;
+    const c = colorFor(d.class_id);
+    ctx.strokeStyle = c;
+    ctx.lineWidth = lw;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    const label = `${d.label} ${d.score.toFixed(2)}`;
+    ctx.font = `600 ${fs}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+    const tw = ctx.measureText(label).width;
+    const pad = fs * 0.3;
+    const ty = Math.max(0, y1 - fs - pad * 2);
+    ctx.fillStyle = c;
+    ctx.fillRect(x1, ty, tw + pad * 2, fs + pad * 2);
+    ctx.fillStyle = '#0b0d11';
+    ctx.textBaseline = 'top';
+    ctx.fillText(label, x1 + pad, ty + pad);
+  }
+}
+
+function renderList(meta) {
+  if (!meta.detections.length) {
+    elList.innerHTML = '<div class="empty">no candy detected</div>';
+    return;
+  }
+  elList.innerHTML = meta.detections.map(d => `
+    <div class="item">
+      <span class="dot" style="background:${colorFor(d.class_id)}"></span>
+      <span class="name">${d.label}</span>
+      <span class="score">${d.score.toFixed(3)}</span>
+    </div>`).join('');
+}
+
+// function handleFrame(buf) {
+//   const view = new DataView(buf);
+//   const hlen = view.getUint32(0, false);
+//   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
+//   const jpeg = new Uint8Array(buf, 4 + hlen);
+
+//   elFps.textContent = 'fps ' + header.fps.toFixed(1);
+//   elInfer.textContent = 'infer ' + header.infer_ms.toFixed(1) + 'ms';
+//   elCount.textContent = header.detections.length + ' object' + (header.detections.length === 1 ? '' : 's');
+//   elMeta.textContent = `${header.width}×${header.height} · ${new Date(header.ts).toLocaleTimeString()}`;
+
+//   renderList(header);
+
+//   const blob = new Blob([jpeg], { type: 'image/jpeg' });
+//   const url = URL.createObjectURL(blob);
+//   const prev = lastUrl;
+//   img.onload = () => {
+//     if (prev) URL.revokeObjectURL(prev);
+//     draw(header);
+//     drawing = false;
+//     if (pending) { const p = pending; pending = null; handleFrame(p); }
+//   };
+//   img.src = url;
+//   lastUrl = url;
+// }
+
+function handleFrame(buf) {
+  let url = null;
+
+  try {
+    const view = new DataView(buf);
+    const hlen = view.getUint32(0, false);
+
+    if (hlen <= 0 || hlen > buf.byteLength - 4) {
+      throw new Error('Invalid frame header length');
+    }
+
+    const header = JSON.parse(
+      new TextDecoder().decode(new Uint8Array(buf, 4, hlen))
+    );
+
+    const jpeg = new Uint8Array(buf, 4 + hlen);
+
+    elFps.textContent = 'fps ' + header.fps.toFixed(1);
+    elInfer.textContent = 'infer ' + header.infer_ms.toFixed(1) + 'ms';
+    elCount.textContent =
+      header.detections.length + ' object' +
+      (header.detections.length === 1 ? '' : 's');
+    elMeta.textContent =
+      `${header.width}×${header.height} · ${new Date(header.ts).toLocaleTimeString()}`;
+
+    renderList(header);
+
+    const blob = new Blob([jpeg], { type: 'image/jpeg' });
+    url = URL.createObjectURL(blob);
+
+    const currentUrl = url;
+    const previousUrl = lastUrl;
+
+    // Register handlers before assigning the image source.
+    img.onload = () => {
+      try {
+        draw(header);
+      } catch (e) {
+        console.error('Frame drawing failed:', e);
+      } finally {
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        drawing = false;
+
+        if (pending !== null) {
+          const next = pending;
+          pending = null;
+          drawing = true;
+          handleFrame(next);
+        }
+      }
+    };
+
+    img.onerror = () => {
+      console.error('JPEG image failed to load');
+
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      URL.revokeObjectURL(currentUrl);
+
+      drawing = false;
+
+      if (pending !== null) {
+        const next = pending;
+        pending = null;
+        drawing = true;
+        handleFrame(next);
+      }
+    };
+
+    lastUrl = currentUrl;
+    img.src = currentUrl;
+
+  } catch (e) {
+    console.error('Frame processing failed:', e);
+
+    if (url) URL.revokeObjectURL(url);
+
+    drawing = false;
+
+    if (pending !== null) {
+      const next = pending;
+      pending = null;
+      drawing = true;
+      handleFrame(next);
+    }
+  }
+}
+
+function sendMode(mode) {
+  requestedMode = mode;
+
+  if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) {
+    controlStatus.textContent = 'Not connected to server';
+    return;
+  }
+
+  controlStatus.textContent = 'Sending mode…';
+
+  controlSocket.send(JSON.stringify({
+    type: 'mode',
+    mode: mode
+  }));
+}
+
+modeSelect.addEventListener('change', () => {
+  sendMode(modeSelect.value);
+});
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  controlSocket = ws;
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('live', 'ok');
+    controlStatus.textContent = 'Connected to server';
+    sendMode(modeSelect.value);
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected', 'bad');
+    controlStatus.textContent = 'Disconnected; reconnecting…';
+    setTimeout(connect, 1500);
+  };
+
+  ws.onerror = () => {
+    setStatus('error', 'bad');
+  };
+
+  ws.onmessage = (ev) => {
+    // Text messages are control responses.
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === 'control') {
+          controlStatus.textContent = msg.message;
+
+          if (!msg.ok) {
+            controlStatus.style.color = '#f87171';
+          } else {
+            controlStatus.style.color = '#4ade80';
+          }
+        }
+      } catch (e) {
+        console.error('Invalid control response', e);
+      }
+
+      return;
+    }
+
+    // Binary messages remain the existing camera frames.
+    if (drawing) {
+      pending = ev.data;
+      return;
+    }
+
+    drawing = true;
+    handleFrame(ev.data);
+  };
+}
+
+connect();
+
+</script>
+</body>
+</html>
