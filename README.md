@@ -251,7 +251,15 @@ A model trained or exported for a different runtime may not work by simply repla
 
 ## 7. Run Candy-Hunter Pumpkin
 
-On the RDK X5, open a terminal in the project directory:
+### Clone the Repository
+
+Clone the project to your RDK X5:
+
+```bash
+git clone https://github.com/YOUR-GITHUB-USERNAME/candy-hunter-pumpkin.git
+```
+
+Navigate to the project directory:
 
 ```bash
 cd candy-hunter-pumpkin
